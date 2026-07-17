@@ -39,6 +39,14 @@ function scanInputTxids (rawTx: Uint8Array): string[] {
   return scanRawTransaction(new ReaderUint8Array(rawTx)).inputTxids
 }
 
+interface TransactionSerializationState {
+  version: number
+  lockTime: number
+  inputCount: number
+  outputCount: number
+  values: unknown[]
+}
+
 /**
  * A single bitcoin transaction associated with a `Beef` validity proof set.
  *
@@ -53,6 +61,7 @@ export default class BeefTx {
   _tx?: Transaction
   _rawTx?: Uint8Array
   _txid?: string
+  private _txSerializationState?: TransactionSerializationState
   inputTxids: string[] = []
   /**
    * true if `hasProof` or all inputs chain to `hasProof`.
@@ -95,9 +104,67 @@ export default class BeefTx {
     if (this._tx != null) return this._tx
     if (this._rawTx != null) {
       this._tx = Transaction.fromBinaryView(this._rawTx)
+      this.captureTransactionSerializationState()
       return this._tx
     }
     return undefined
+  }
+
+  private captureTransactionSerializationState (): void {
+    if (this._tx == null) {
+      this._txSerializationState = undefined
+      return
+    }
+    const values: unknown[] = []
+    for (const input of this._tx.inputs) {
+      values.push(
+        input.sourceTXID,
+        input.sourceTXID == null ? input.sourceTransaction : undefined,
+        input.sourceOutputIndex,
+        input.unlockingScript?.toUint8Array(),
+        input.sequence
+      )
+    }
+    for (const output of this._tx.outputs) {
+      values.push(output.satoshis, output.lockingScript.toUint8Array())
+    }
+    this._txSerializationState = {
+      version: this._tx.version,
+      lockTime: this._tx.lockTime,
+      inputCount: this._tx.inputs.length,
+      outputCount: this._tx.outputs.length,
+      values
+    }
+  }
+
+  private transactionSerializationStateChanged (): boolean {
+    const tx = this._tx
+    const state = this._txSerializationState
+    if (tx == null || state == null) return true
+    if (
+      state.version !== tx.version ||
+      state.lockTime !== tx.lockTime ||
+      state.inputCount !== tx.inputs.length ||
+      state.outputCount !== tx.outputs.length
+    ) return true
+
+    let offset = 0
+    for (const input of tx.inputs) {
+      if (
+        state.values[offset++] !== input.sourceTXID ||
+        state.values[offset++] !== (input.sourceTXID == null ? input.sourceTransaction : undefined) ||
+        state.values[offset++] !== input.sourceOutputIndex ||
+        state.values[offset++] !== input.unlockingScript?.toUint8Array() ||
+        state.values[offset++] !== input.sequence
+      ) return true
+    }
+    for (const output of tx.outputs) {
+      if (
+        state.values[offset++] !== output.satoshis ||
+        state.values[offset++] !== output.lockingScript.toUint8Array()
+      ) return true
+    }
+    return false
   }
 
   /**
@@ -113,22 +180,28 @@ export default class BeefTx {
    */
   get rawTxUint8Array (): Uint8Array | undefined {
     if (this._tx != null) {
-      if (this._rawTx == null) this._rawTx = this._tx.toUint8Array()
-      else this.syncRawTxFromTransaction()
+      if (this._rawTx == null) {
+        this._rawTx = this._tx.toUint8Array()
+        this.captureTransactionSerializationState()
+      } else this.syncRawTxFromTransaction()
       return this._rawTx
     }
     return this._rawTx
   }
 
   /**
-   * Synchronizes a lazily parsed transaction after mutation through the normal
-   * Transaction APIs. Returns true when its serialized bytes changed.
+   * Synchronizes a lazily parsed transaction after mutation. Returns true when
+   * its serialized bytes changed.
    *
    * @internal
    */
   syncRawTxFromTransaction (): boolean {
     if (this._tx == null || this._rawTx == null) return false
-    const bytes = this._tx.toUint8Array()
+    const fieldsChanged = this.transactionSerializationStateChanged()
+    const bytes = fieldsChanged
+      ? this._tx.refreshSerializedBytes()
+      : this._tx.toUint8Array()
+    if (fieldsChanged) this.captureTransactionSerializationState()
     if (bytes === this._rawTx) return false
     this._rawTx = bytes
     this._txid = undefined

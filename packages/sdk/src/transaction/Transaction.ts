@@ -734,6 +734,32 @@ export default class Transaction {
   }
 
   /**
+   * Rebuilds the serialized transaction from its public fields and refreshes
+   * serialization-dependent caches when those bytes have changed.
+   *
+   * @internal
+   */
+  refreshSerializedBytes (): Uint8Array {
+    const rebuilt = this.buildSerializedBytes()
+    const cached = this.rawBytesCache
+
+    if (cached != null && cached.length === rebuilt.length) {
+      let unchanged = true
+      for (let index = 0; index < cached.length; index++) {
+        if (cached[index] !== rebuilt[index]) {
+          unchanged = false
+          break
+        }
+      }
+      if (unchanged) return cached
+    }
+
+    this.invalidateSerializationCaches()
+    this.rawBytesCache = rebuilt
+    return rebuilt
+  }
+
+  /**
    * Converts the transaction to a binary array format.
    *
    * @returns {number[]} - The binary array representation of the transaction.

@@ -78,8 +78,11 @@ describe('transaction pipeline scalability', () => {
     expect(newest.inputTxids).toHaveLength(1)
     expect(newest.tx).toBeDefined()
     expect(newest._tx).toBeDefined()
+    if (newest.tx == null) throw new Error('Expected newest transaction')
+    const refreshSerializedBytes = jest.spyOn(newest.tx, 'refreshSerializedBytes')
     expect(beef.txs.slice(0, -1).every(btx => btx._tx == null)).toBe(true)
     expect(beef.toUint8Array()).toBe(forwarded)
+    expect(refreshSerializedBytes).not.toHaveBeenCalled()
   })
 
   it('retains legacy serialization of mutations made after lazy parsing', () => {
@@ -87,12 +90,43 @@ describe('transaction pipeline scalability', () => {
     const newest = beef.txs.at(-1)
     if (newest?.tx == null) throw new Error('Expected newest transaction')
     const oldTxid = newest.txid
+    const refreshSerializedBytes = jest.spyOn(newest.tx, 'refreshSerializedBytes')
 
     newest.tx.addOutput({ satoshis: 0, lockingScript: Script.fromHex('51') })
     const reparsed = Beef.fromBinary(beef.toUint8Array())
 
+    expect(refreshSerializedBytes).toHaveBeenCalledTimes(1)
     expect(newest.txid).not.toBe(oldTxid)
     expect(reparsed.txs.at(-1)?.tx?.outputs).toHaveLength(2)
+  })
+
+  it.each([
+    ['copy-safe parsing', (bytes: Uint8Array) => Beef.fromBinary(bytes)],
+    ['zero-copy parsing', (bytes: Uint8Array) => Beef.fromBinaryView(bytes)]
+  ])('round-trips direct field mutations after %s', (_label, parse) => {
+    const beef = parse(makeDeepChain(2).toBEEFBytes())
+    const newest = beef.txs.at(-1)
+    if (newest?.tx == null) throw new Error('Expected newest transaction')
+    const oldTxid = newest.txid
+    const refreshSerializedBytes = jest.spyOn(newest.tx, 'refreshSerializedBytes')
+
+    newest.tx.version = 2
+    newest.tx.lockTime = 42
+    newest.tx.inputs[0].sequence = 0xfffffffe
+    newest.tx.outputs[0].satoshis = 7
+
+    const serialized = beef.toUint8Array()
+    beef.toUint8Array()
+    const reparsed = Beef.fromBinary(serialized).txs.at(-1)?.tx
+    if (reparsed == null) throw new Error('Expected reparsed transaction')
+
+    expect(refreshSerializedBytes).toHaveBeenCalledTimes(1)
+    expect(newest.txid).not.toBe(oldTxid)
+    expect(reparsed.id('hex')).toBe(newest.txid)
+    expect(reparsed.version).toBe(2)
+    expect(reparsed.lockTime).toBe(42)
+    expect(reparsed.inputs[0].sequence).toBe(0xfffffffe)
+    expect(reparsed.outputs[0].satoshis).toBe(7)
   })
 
   it('links Atomic BEEF through an explicit zero-copy API', () => {
